@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Líderes del mercado · Binance</title>
+<style>
+:root{--bg:#141414;--panel:#1b1b1b;--line:#2a2a2a;--tx:#e8e8e8;--mut:#8a8a8a;--up:#3ddc97;--dn:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.4 "Segoe UI",system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--line)}
+h1{font-size:18px;margin:0;font-weight:600}
+.ctl{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--mut)}
+button,select{background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit;cursor:pointer}
+button.on{background:#2f2f2f;border-color:#666}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid #6aa3ff}
+main{display:grid;grid-template-columns:1fr 210px;gap:10px;padding:12px 20px}
+#wrap{position:relative;height:calc(100vh - 150px);min-height:360px}
+canvas{width:100%;height:100%;display:block}
+#leg{list-style:none;margin:0;padding:0;overflow:auto;max-height:calc(100vh - 150px)}
+#leg li{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:4px}
+#leg li.hl{background:#262626}
+#leg i{width:9px;height:9px;border-radius:50%;flex:none}
+#leg b{font-weight:600;flex:1}
+.u{color:var(--up)}.d{color:var(--dn)}
+#tip{position:absolute;pointer-events:none;background:#000c;border:1px solid #444;border-radius:4px;padding:3px 8px;display:none;white-space:nowrap}
+#st{padding:0 20px 14px;color:var(--mut);font-size:12px}
+@media(max-width:760px){main{grid-template-columns:1fr;padding:12px}#leg{max-height:none}#wrap{height:60vh}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Líderes del mercado · Binance spot (USDT)</h1>
+  <div class="ctl">
+    <span id="per"></span>
+    <label>Pares <select id="n"><option>20</option><option selected>25</option></select></label>
+    <label>Vol. mín. 24h <select id="vol"><option value="1e6">1 M</option><option value="5e6" selected>5 M</option><option value="2e7">20 M</option><option value="1e8">100 M</option></select></label>
+    <label><input type="checkbox" id="auto" checked> Auto (60 s)</label>
+  </div>
+</header>
+<main>
+  <div id="wrap"><canvas id="cv"></canvas><div id="tip"></div></div>
+  <ul id="leg"></ul>
+</main>
+<div id="st">Cargando…</div>
+
+<script>
+const HOSTS=['https://data-api.binance.vision','https://api.binance.com'];
+let host=HOSTS[0];
+async function get(path){
+  for(const h of [host,...HOSTS.filter(x=>x!==host)]){
+    try{const r=await fetch(h+path);if(r.ok){host=h;return await r.json()}}catch(e){}
+  }
+  throw new Error('No se pudo conectar con Binance');
+}
+const P={'1h':['1m',60],'4h':['5m',48],'24h':['15m',96],'7d':['1h',168]};
+const BAD=/(UP|DOWN|BULL|BEAR)USDT$/;
+const STABLE=new Set(['USDC','FDUSD','TUSD','USDP','DAI','EUR','AEUR','USDE','XUSD','BFUSD','RLUSD','USD1','EURI','PAXG','UST']);
+const state={per:'24h',sel:[],hl:null,geo:null,busy:false};
+const $=id=>document.getElementById(id);
+const cv=$('cv'),tip=$('tip'),leg=$('leg');
+
+// selector de periodo
+Object.keys(P).forEach(k=>{
+  const b=document.createElement('button');b.textContent=k;b.dataset.k=k;
+  b.onclick=()=>{state.per=k;mark();load()};$('per').appendChild(b);
+});
+function mark(){[...$('per').children].forEach(b=>b.classList.toggle('on',b.dataset.k===state.per))}
+mark();
+$('n').onchange=()=>load();
+$('vol').onchange=()=>load();
+
+async function load(){
+  if(state.busy)return;state.busy=true;
+  $('st').textContent='Descargando datos de Binance…';
+  try{
+    const [iv,lim]=P[state.per],minVol=+$('vol').value,N=+$('n').value;
+    const tk=(await get('/api/v3/ticker/24hr')).filter(t=>
+      t.symbol.endsWith('USDT')&&!BAD.test(t.symbol)&&!STABLE.has(t.symbol.slice(0,-4))&&+t.quoteVolume>=minVol);
+    const byCh=[...tk].sort((a,b)=>b.priceChangePercent-a.priceChangePercent).slice(0,70);
+    const byVol=[...tk].sort((a,b)=>b.quoteVolume-a.quoteVolume).slice(0,30);
+    const cands=[...new Set([...byCh,...byVol].map(t=>t.symbol))];
+    const out=[];
+    for(let i=0;i<cands.length;i+=10){
+      const batch=await Promise.all(cands.slice(i,i+10).map(async s=>{
+        try{
+          const k=await get(`/api/v3/klines?symbol=${s}&interval=${iv}&limit=${lim}`);
+          if(k.length<lim*0.8)return null;
+          const b=+k[0][1];
+          return{sym:s.slice(0,-4),t:k.map(x=>x[6]),v:k.map(x=>(+x[4]/b-1)*100)};
+        }catch(e){return null}
+      }));
+      out.push(...batch.filter(Boolean));
+    }
+    out.sort((a,b)=>b.v.at(-1)-a.v.at(-1));
+    state.sel=out.slice(0,N);
+    state.sel.forEach((s,i)=>s.c=`hsl(${(i*137.5)%360},70%,${62+(i%3)*4}%)`);
+    renderLeg();draw();
+    $('st').textContent=`Actualizado ${new Date().toLocaleTimeString('es-ES')} · ${tk.length} pares filtrados, ${out.length} analizados · hora local`;
+  }catch(e){
+    $('st').textContent='Error: '+e.message+'. Abre este archivo en tu navegador (no dentro de un visor con restricciones) y comprueba tu conexión.';
+  }
+  state.busy=false;
+}
+
+function renderLeg(){
+  leg.innerHTML='';
+  state.sel.forEach(s=>{
+    const v=s.v.at(-1),li=document.createElement('li');li.dataset.s=s.sym;
+    li.innerHTML=`<i style="background:${s.c}"></i><b>${s.sym}</b><span class="${v>=0?'u':'d'}">${v>=0?'+':''}${v.toFixed(2)}%</span>`;
+    li.onmouseenter=()=>setHl(s.sym);li.onmouseleave=()=>setHl(null);
+    leg.appendChild(li);
+  });
+}
+function setHl(s){
+  if(state.hl===s)return;state.hl=s;
+  [...leg.children].forEach(li=>li.classList.toggle('hl',li.dataset.s===s));
+  draw();
+}
+
+function fmtT(t){
+  const d=new Date(t);
+  const hm=d.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'});
+  return state.per==='7d'?d.toLocaleDateString('es-ES',{day:'2-digit',month:'2-digit'})+' '+hm:hm;
+}
+
+function draw(){
+  const S=state.sel;if(!S.length)return;
+  const dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;
+  cv.width=w*dpr;cv.height=h*dpr;
+  const x=cv.getContext('2d');x.scale(dpr,dpr);
+  const L=50,R=8,T=8,B=24;
+  let t0=Infinity,t1=-Infinity,lo=0,hi=0;
+  S.forEach(s=>{t0=Math.min(t0,s.t[0]);t1=Math.max(t1,s.t.at(-1));s.v.forEach(v=>{lo=Math.min(lo,v);hi=Math.max(hi,v)})});
+  const pad=(hi-lo)*.06||1;lo-=pad;hi+=pad;
+  const X=t=>L+(t-t0)/(t1-t0)*(w-L-R),Y=v=>T+(hi-v)/(hi-lo)*(h-T-B);
+  state.geo={L,R,t0,t1,w,Y};
+  x.font='12px "Segoe UI",system-ui,sans-serif';
+  // rejilla Y
+  const raw=(hi-lo)/6,mag=Math.pow(10,Math.floor(Math.log10(raw)));
+  const step=[1,2,5,10].find(m=>m*mag>=raw)*mag;
+  x.textAlign='right';x.textBaseline='middle';
+  for(let v=Math.ceil(lo/step)*step;v<=hi;v+=step){
+    const y=Y(v);x.strokeStyle=Math.abs(v)<1e-9?'#555':'#222';
+    x.setLineDash(Math.abs(v)<1e-9?[4,4]:[]);
+    x.beginPath();x.moveTo(L,y);x.lineTo(w-R,y);x.stroke();
+    x.fillStyle='#8a8a8a';x.fillText(v.toFixed(step<1?1:0)+'%',L-6,y);
+  }
+  x.setLineDash([]);
+  // eje X
+  x.textAlign='center';x.textBaseline='top';x.fillStyle='#8a8a8a';
+  for(let i=0;i<=5;i++){const t=t0+(t1-t0)*i/5;x.fillText(fmtT(t),Math.min(Math.max(X(t),L+22),w-R-22),h-B+6)}
+  // líneas
+  const order=[...S].sort((a,b)=>(a.sym===state.hl)-(b.sym===state.hl));
+  order.forEach(s=>{
+    const on=!state.hl||state.hl===s.sym;
+    x.globalAlpha=on?1:.15;x.strokeStyle=s.c;x.lineWidth=state.hl===s.sym?2.6:1.4;
+    x.beginPath();s.t.forEach((t,i)=>{const px=X(t),py=Y(s.v[i]);i?x.lineTo(px,py):x.moveTo(px,py)});x.stroke();
+  });
+  x.globalAlpha=1;
+}
+
+// resaltar línea más cercana al ratón
+cv.addEventListener('mousemove',e=>{
+  const g=state.geo;if(!g)return;
+  const r=cv.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  const t=g.t0+(mx-g.L)/(g.w-g.L-g.R)*(g.t1-g.t0);
+  let best=null,bd=22;
+  state.sel.forEach(s=>{
+    let j=0,dj=Infinity;
+    s.t.forEach((tt,i)=>{const d=Math.abs(tt-t);if(d<dj){dj=d;j=i}});
+    const d=Math.abs(g.Y(s.v[j])-my);if(d<bd){bd=d;best=s}
+  });
+  setHl(best?best.sym:null);
+  if(best){const v=best.v.at(-1);tip.style.display='block';tip.style.left=Math.min(mx+12,g.w-110)+'px';tip.style.top=(my+12)+'px';
+    tip.innerHTML=`<b style="color:${best.c}">${best.sym}</b> ${v>=0?'+':''}${v.toFixed(2)}%`}
+  else tip.style.display='none';
+});
+cv.addEventListener('mouseleave',()=>{setHl(null);tip.style.display='none'});
+addEventListener('resize',draw);
+
+setInterval(()=>{if($('auto').checked&&!document.hidden)load()},60000);
+load();
+</script>
+</body>
+</html>
